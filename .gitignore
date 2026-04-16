@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+
+# Vector Database (Çok büyük boyutlu veritabanı, git'e eklenmemeli)
+chroma_db/
+
+# Sistem Geçici Dosyaları (PDF/TXT yüklerken oluşan geçici dosyalar)
+temp_*
+
+# IDE & İşletim Sistemi dosyaları
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# (İsteğe Bağlı) Kullanıcıya özel CSV ve PDF'lerin Github'a sızmasını istemiyorsanız:
+ *.pdf
+# *.csv
+# *.xlsx
