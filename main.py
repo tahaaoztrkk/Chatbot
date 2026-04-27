@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.tools import tool
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyMuPDFLoader, TextLoader
@@ -13,7 +14,7 @@ import pandas as pd
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Ollama Phi FastAPI RAG Server")
+app = FastAPI(title="Ollama Qwen FastAPI RAG Server")
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,7 +25,7 @@ app.add_middleware(
 )
 
 # 1. Initialize the locally running Ollama model using the new package class
-llm = ChatOllama(model="phi3-yerel", temperature=0)
+llm = ChatOllama(model="qwen3", temperature=0)
 
 # 2. Initialize the Sentence-Transformers embedding model
 # Opted for a multilingual model robust on Turkish texts as per requirements.
@@ -45,6 +46,12 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     sources: List[str] = []
+
+@tool
+def get_today_count() -> int:
+    """Canlı sistemden bugünün toplam döner sayım/üretim adedini çeker."""
+    # Placeholder for actual DB/API integration
+    return 1453
 
 @app.post("/upload-doc")
 async def upload_doc_endpoint(file: UploadFile = File(...)):
@@ -92,7 +99,6 @@ async def upload_doc_endpoint(file: UploadFile = File(...)):
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
@@ -117,8 +123,8 @@ async def chat_endpoint(request: ChatRequest):
         
     # 3. Create context-aware Chat messages
     messages = [
-        SystemMessage(content=f"You are an intelligent assistant. Answer the user's question based strictly on the provided Context. If the answer cannot be found in the Context, return exactly 'I cannot find the answer in the provided document.' Do not make up answers.\n\nContext:\n{context_text}{history_text}"),
-        HumanMessage(content=request.text)
+        SystemMessage(content="You are an intelligent assistant. Answer the user's question based strictly on the provided Context. If the answer cannot be found in the Context, return exactly 'I cannot find the answer in the provided document.' Do not make up answers."),
+        HumanMessage(content=f"Context:\n{context_text}{history_text}\n\nUser Question: {request.text}")
     ]
 
     # 4. Asynchronously invoke Ollama with properly structured chat templates
@@ -180,22 +186,24 @@ class AskRequest(BaseModel):
 @app.post("/ask")
 async def ask_endpoint(request: AskRequest):
     """
-    Akıllı Yönlendirici (Router). Gelen soruyu analiz edip RAG (TEXT) veya Pandas (DATA) ajanına yönlendirir.
+    Akıllı Yönlendirici (Router). Gelen soruyu analiz edip RAG (TEXT) veya Canlı (LIVE) ajanına yönlendirir.
     """
     router_messages = [
-        SystemMessage(content="You are a binary decision router. Classify the user input. Output exactly 'DATA' or 'TEXT' and nothing else!"),
-        HumanMessage(content="Hangi kategoriden kaç satış yapıldı?"),
-        AIMessage(content="DATA"),
+        SystemMessage(content="You are a strict router. Classify the user input. Output exactly 'TEXT' or 'LIVE' and nothing else!"),
+        HumanMessage(content="Bugün kaç tane sayıldı?"),
+        AIMessage(content="LIVE"),
         HumanMessage(content="Mektubu kim yazmış?"),
         AIMessage(content="TEXT"),
-        HumanMessage(content="En yüksek gelir nerede veri analiz et?"),
-        AIMessage(content="DATA"),
+        HumanMessage(content="Üretim ne durumda? Toplam sayım kaç?"),
+        AIMessage(content="LIVE"),
         HumanMessage(content="Taha'nın CV'sinde bahsettiği teknolojiler nelerdir?"),
         AIMessage(content="TEXT"),
         HumanMessage(content="What is the main topic of the internship?"),
         AIMessage(content="TEXT"),
-        HumanMessage(content="Sum up all the quantities in the data table."),
-        AIMessage(content="DATA"),
+        HumanMessage(content="What is the current live count for today?"),
+        AIMessage(content="LIVE"),
+        HumanMessage(content="How is the production going?"),
+        AIMessage(content="LIVE"),
         HumanMessage(content=request.text)
     ]
 
@@ -205,43 +213,28 @@ async def ask_endpoint(request: AskRequest):
     print(f"ROUTER DECISION FOR '{request.text}': {decision}") # Termilae loglamak için
     
     # Karar mekanizması (chatty model koruması)
-    is_data = ("DATA" in decision and "TEXT" not in decision) or decision == "DATA"
+    is_live = ("LIVE" in decision) or decision == "LIVE"
     
-    if is_data:
-        clean_path = request.file_path.strip('\"\'') if request.file_path else None
-        if not clean_path or not os.path.exists(clean_path):
-            raise HTTPException(status_code=400, detail="Soru veri analizi içeriyor ancak geçerli bir file_path (CSV) verilmedi.")
+    if is_live:
+        count = get_today_count.invoke({})
+        history_text = ""
+        if request.history:
+            for msg in request.history[-4:]:
+                role = "Kullanıcı" if msg.get("role") == "user" else "Asistan"
+                history_text += f"{role}: {msg.get('content')}\n"
+            history_text = f"\nÖnceki Konuşmalar:\n{history_text}\n"
+
+        messages = [
+            SystemMessage(content="You are a helpful operational assistant. Tell the user the current live production count in a natural, friendly language. Do NOT use fake numbers."),
+            HumanMessage(content=f"System context: The current operational live count from the database is {count}.{history_text}\n\nUser Question: {request.text}")
+        ]
+        response = await llm.ainvoke(messages)
+        return {"routed_to": "LIVE", "reply": response.content, "sources": []}
         
-        try:
-            try:
-                df = pd.read_csv(clean_path, encoding='utf-8', sep=None, engine='python', on_bad_lines='skip')
-            except UnicodeDecodeError:
-                try:
-                    df = pd.read_csv(clean_path, encoding='cp1254', sep=None, engine='python', on_bad_lines='skip')
-                except Exception:
-                    df = pd.read_csv(clean_path, encoding='utf-8', encoding_errors='ignore', sep=None, engine='python', on_bad_lines='skip')
-                
-            agent = create_pandas_dataframe_agent(
-                llm, df, verbose=True, allow_dangerous_code=True, handle_parsing_errors=True
-            )
-            try:
-                response = await agent.ainvoke({"input": request.text})
-                return {"routed_to": "DATA", "reply": response.get("output", str(response))}
-            except Exception as e:
-                error_str = str(e)
-                if "Could not parse LLM output:" in error_str:
-                    raw_output = error_str.split("Could not parse LLM output: ")[-1].strip("`\n ")
-                    return {"routed_to": "DATA", "reply": raw_output}
-                else:
-                    raise HTTPException(status_code=500, detail=error_str)
-        except HTTPException as he:
-            raise he
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-            
     else:
         # Varsayılan / Fallback durumunda RAG (TEXT) çalıştır
-        retrieved_docs = await vector_store.asimilarity_search(request.text, k=5)
+        # Qwen3'ün devasa bağlam (context) penceresi sayesinde k=15'e çıkararak çok daha fazla belge çekiyoruz.
+        retrieved_docs = await vector_store.asimilarity_search(request.text, k=15)
         context_text = "\n\n".join([doc.page_content for doc in retrieved_docs])
         source_names = list(set([doc.metadata.get("source", "Unknown") for doc in retrieved_docs]))
         
@@ -253,8 +246,8 @@ async def ask_endpoint(request: AskRequest):
             history_text = f"\nÖnceki Konuşmalar:\n{history_text}\n"
 
         messages = [
-            SystemMessage(content=f"You are an intelligent assistant. Answer the user's question based strictly on the provided Context. If the answer cannot be found in the Context, return exactly 'I cannot find the answer in the provided document.' Do not make up answers.\n\nContext:\n{context_text}{history_text}"),
-            HumanMessage(content=request.text)
+            SystemMessage(content="You are an intelligent assistant. Answer the user's question based strictly on the provided Context. If the answer cannot be found in the Context, return exactly 'I cannot find the answer in the provided document.' Do not make up answers."),
+            HumanMessage(content=f"Context:\n{context_text}{history_text}\n\nUser Question: {request.text}")
         ]
         
         response = await llm.ainvoke(messages)
